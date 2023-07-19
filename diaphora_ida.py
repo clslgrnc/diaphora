@@ -37,7 +37,7 @@ from idautils import *
 # pylint: enable=wildcard-import
 
 import idaapi
-
+import ida_pro
 idaapi.require("diaphora")
 
 try:
@@ -1212,6 +1212,31 @@ class CIDABinDiff(diaphora.CBinDiff):
 
     log_refresh("Creating indices...")
     self.create_indices()
+
+  def xxxxxx(self):
+    log(f"custom function {ARGV[1:]}")
+    if not (len(ARGV) == 3 and ARGV[1].isdigit() and ARGV[2].isdigit()):
+      return
+    my_slice = int(ARGV[1])
+    nbr_steps = int(ARGV[2])
+
+    config.PARALLEL["my_slice"] = my_slice
+    config.PARALLEL["nbr_steps"] = nbr_steps
+
+    if not (0<=my_slice<nbr_steps):
+      return
+
+    log(f"custom function {self.max_ea=}")
+    funcs = [0] + sorted(Functions()) + [self.max_ea]
+    step = (len(funcs) + nbr_steps-1)//nbr_steps
+    myfuncs = funcs[my_slice*step:(my_slice+1)*step + 1]
+    log(f"custom function {len(myfuncs)}")
+    self.min_ea = myfuncs[0]
+    self.max_ea = myfuncs[-1]
+
+    config.PARALLEL["min_ea"] = self.min_ea
+    config.PARALLEL["max_ea"] = self.max_ea
+
 
   def export(self):
     """
@@ -3530,6 +3555,7 @@ def _diff_or_export(use_ui, **options):
       ret = ask_yn(
         0, "Export database already exists. Do you want to overwrite it?"
       )
+      ida_pro.qexit(0)
       if ret == -1:
         log("Cancelled")
         return None
@@ -3581,6 +3607,8 @@ def _diff_or_export(use_ui, **options):
         profiler.print_stats(sort="time")
       else:
         try:
+          log("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+          bd.xxxxxx()
           bd.export()
           exported = True
         except KeyboardInterrupt:
@@ -3591,6 +3619,7 @@ def _diff_or_export(use_ui, **options):
         final_t = time.monotonic() - t0
         # pylint: disable-next=consider-using-f-string
         log(f"Database exported, time taken: {datetime.timedelta(seconds=final_t)}.")
+        ida_pro.qexit(0)
         hide_wait_box()
 
     if opts.file_in != "":
@@ -3921,7 +3950,10 @@ def main():
     if _to_ea is not None:
       bd.max_ea = int(_to_ea, 16)
 
+    log(f"=================== {bd.min_ea=} {bd.max_ea=}")
+
     try:
+      log("YYYYYYYYYYYYYYYYYYYYYYYYY")
       bd.export()
     except KeyboardInterrupt:
       log(f"Aborted by user, removing crash file {file_out}-crash...")

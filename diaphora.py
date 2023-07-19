@@ -18,51 +18,36 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import datetime
+import decimal
+import imp
+import importlib
+import json
+import logging
 import os
 import re
-import sys
-import imp
-import time
-import json
-import decimal
 import sqlite3
-import logging
-import datetime
-import importlib
+import sys
 import threading
+import time
 import traceback
-
-from io import StringIO
-from threading import Thread, Lock
-from multiprocessing import cpu_count
 from difflib import SequenceMatcher, unified_diff
-
-import diaphora_config as config
-import diaphora_heuristics
-
-from diaphora_heuristics import (
-  HEURISTICS,
-  HEUR_TYPE_RATIO,
-  HEUR_TYPE_RATIO_MAX,
-  HEUR_TYPE_RATIO_MAX_TRUSTED,
-  HEUR_FLAG_UNRELIABLE,
-  HEUR_FLAG_SLOW,
-  HEUR_FLAG_SAME_CPU,
-  HEUR_TYPE_NO_FPS,
-  get_query_fields,
-)
+from io import StringIO
+from multiprocessing import cpu_count
+from threading import Lock, Thread
 
 import database
-
-
+import diaphora_config as config
+import diaphora_heuristics
 from database import schema
+from diaphora_heuristics import (HEUR_FLAG_SAME_CPU, HEUR_FLAG_SLOW,
+                                 HEUR_FLAG_UNRELIABLE, HEUR_TYPE_NO_FPS,
+                                 HEUR_TYPE_RATIO, HEUR_TYPE_RATIO_MAX,
+                                 HEUR_TYPE_RATIO_MAX_TRUSTED, HEURISTICS,
+                                 get_query_fields)
+from jkutils.factor import FACTORS_CACHE, difference, difference_ratio
+from jkutils.factor import primesbelow as primes
 from jkutils.kfuzzy import CKoretFuzzyHashing
-from jkutils.factor import (
-  FACTORS_CACHE,
-  difference,
-  difference_ratio,
-  primesbelow as primes,
-)
 
 try:
   # pylint: disable-next=unused-import
@@ -680,11 +665,13 @@ class CBinDiff:
     database.
     """
     instructions_ids = {}
-    sql = """insert into main.instructions (address, mnemonic, disasm,
+    if "main.instructions" not in config.PARALLEL:
+      config.PARALLEL["main.instructions"] = config.PARALLEL.get("my_slice", 0)
+    sql = """insert into main.instructions (rowid, address, mnemonic, disasm,
                       comment1, comment2, operand_names, name,
                       type, pseudocomment, pseudoitp, func_id,
                       asm_type)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native')"""
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native')"""
     cur_execute = cur.execute
     for key in bb_data:
       for instruction in bb_data[key]:
@@ -710,7 +697,8 @@ class CBinDiff:
         instruction_properties.append(pseudocomment)
         instruction_properties.append(pseudoitp)
         instruction_properties.append(func_id)
-        cur.execute(sql, instruction_properties)
+        cur.execute(sql, [config.PARALLEL["main.instructions"]] + instruction_properties)
+        config.PARALLEL["main.instructions"] += config.PARALLEL.get("nbr_steps", 1)
         db_id = cur.lastrowid
         instructions_ids[addr] = db_id
     return cur_execute, instructions_ids
@@ -724,8 +712,12 @@ class CBinDiff:
     """
     num = 0
     bb_ids = {}
-    sql1 = "insert into main.basic_blocks (num, address, asm_type) values (?, ?, 'native')"
-    sql2 = "insert into main.bb_instructions (basic_block_id, instruction_id) values (?, ?)"
+    if "main.basic_blocks" not in config.PARALLEL:
+      config.PARALLEL["main.basic_blocks"] = config.PARALLEL.get("my_slice", 0)
+    sql1 = "insert into main.basic_blocks (rowid, num, address, asm_type) values (?, ?, ?, 'native')"
+    if "main.bb_instructions" not in config.PARALLEL:
+      config.PARALLEL["main.bb_instructions"] = config.PARALLEL.get("my_slice", 0)
+    sql2 = "insert into main.bb_instructions (rowid, basic_block_id, instruction_id) values (?, ?, ?)"
 
     self_get_bb_id = self.get_bb_id
     for key in bb_data:
@@ -734,31 +726,40 @@ class CBinDiff:
       ins_ea = str(key)
       last_bb_id = self_get_bb_id(ins_ea)
       if last_bb_id is None:
-        cur_execute(sql1, (num, str(ins_ea)))
+        cur_execute(sql1, (config.PARALLEL["main.basic_blocks"], num, str(ins_ea)))
+        config.PARALLEL["main.basic_blocks"] += config.PARALLEL.get("nbr_steps", 1)
         last_bb_id = cur.lastrowid
       bb_ids[ins_ea] = last_bb_id
 
       # Insert relations between basic blocks and instructions
       for instruction in bb_data[key]:
         ins_id = instructions_ids[instruction[0]]
-        cur_execute(sql2, (last_bb_id, ins_id))
+        cur_execute(sql2, (config.PARALLEL["main.bb_instructions"], last_bb_id, ins_id))
+        config.PARALLEL["main.bb_instructions"] += config.PARALLEL.get("nbr_steps", 1)
 
     # Insert relations between basic blocks
-    sql = "insert into main.bb_relations (parent_id, child_id) values (?, ?)"
+    if "main.bb_relations" not in config.PARALLEL:
+      config.PARALLEL["main.bb_relations"] = config.PARALLEL.get("my_slice", 0)
+    sql = "insert into main.bb_relations (rowid, parent_id, child_id) values (?, ?, ?)"
     for key in bb_relations:
       for bb in bb_relations[key]:
         bb = str(bb)
         key = str(key)
         try:
-          cur_execute(sql, (bb_ids[key], bb_ids[bb]))
+          cur_execute(sql, (config.PARALLEL["main.bb_relations"], bb_ids[key], bb_ids[bb]))
+          config.PARALLEL["main.bb_relations"] += config.PARALLEL.get("nbr_steps", 1)
         except:
           # key doesnt exist because it doesnt have forward references to any bb
           log(f"Error: {str(sys.exc_info()[1])}")
 
     # And finally insert the functions to basic blocks relations
-    sql = "insert into main.function_bblocks (function_id, basic_block_id, asm_type) values (?, ?, 'native')"
+    if "main.function_bblocks" not in config.PARALLEL:
+      config.PARALLEL["main.function_bblocks"] = config.PARALLEL.get("my_slice", 0)
+    sql = "insert into main.function_bblocks (rowid, function_id, basic_block_id, asm_type) values (?, ?, ?, 'native')"
     for key, bb_id in bb_ids.items():
-      cur_execute(sql, (func_id, bb_id))
+      cur_execute(sql, (config.PARALLEL["main.function_bblocks"], func_id, bb_id))
+      config.PARALLEL["main.function_bblocks"] += config.PARALLEL.get("nbr_steps", 1)
+
 
   def save_microcode_instructions(
     self, func_id, cur, cur_execute, microcode_bblocks, microcode_bbrelations
@@ -766,25 +767,37 @@ class CBinDiff:
     """
     Save all the microcode instructions in the basic block @bb_data to the database.
     """
-    sql_inst = """insert into main.instructions (address, mnemonic, disasm, comment1,
+    if "main.instructions" not in config.PARALLEL:
+      config.PARALLEL["main.instructions"] = config.PARALLEL.get("my_slice", 0)
+    sql_inst = """insert into main.instructions (rowid, address, mnemonic, disasm, comment1,
                          pseudocomment, func_id, asm_type)
-                values (?, ?, ?, ?, ?, ?, 'microcode')"""
-    sql_bblock = "insert into main.basic_blocks (num, address, asm_type) values (?, ?, 'microcode')"
-    sql_bbinst = "insert into main.bb_instructions (basic_block_id, instruction_id) values (?, ?)"
+                values (?, ?, ?, ?, ?, ?, ?, 'microcode')"""
+    if "main.basic_blocks" not in config.PARALLEL:
+      config.PARALLEL["main.basic_blocks"] = config.PARALLEL.get("my_slice", 0)
+    sql_bblock = "insert into main.basic_blocks (rowid, num, address, asm_type) values (?, ?, ?, 'microcode')"
+    if "main.bb_instructions" not in config.PARALLEL:
+      config.PARALLEL["main.bb_instructions"] = config.PARALLEL.get("my_slice", 0)
+    sql_bbinst = "insert into main.bb_instructions (rowid, basic_block_id, instruction_id) values (?, ?, ?)"
+    if "main.bb_relations" not in config.PARALLEL:
+      config.PARALLEL["main.bb_relations"] = config.PARALLEL.get("my_slice", 0)
     sql_bbrelations = (
-      "insert into main.bb_relations (parent_id, child_id) values (?, ?)"
+      "insert into main.bb_relations (rowid, parent_id, child_id) values (?, ?, ?)"
     )
-    sql_func_blocks = "insert into main.function_bblocks (function_id, basic_block_id, asm_type) values (?, ?, 'microcode')"
+    if "main.function_bblocks" not in config.PARALLEL:
+      config.PARALLEL["main.function_bblocks"] = config.PARALLEL.get("my_slice", 0)
+    sql_func_blocks = "insert into main.function_bblocks (rowid, function_id, basic_block_id, asm_type) values (?, ?, ?, 'microcode')"
     num = 0
     for key in microcode_bblocks:
       # Create a new microcode basic block
       start_ea = self.get_valid_prop(microcode_bblocks[key]["start"])
-      cur_execute(sql_bblock, [num, start_ea])
+      cur_execute(sql_bblock, [config.PARALLEL["main.basic_blocks"], num, start_ea])
+      config.PARALLEL["main.basic_blocks"] += config.PARALLEL.get("nbr_steps", 1)
       bblock_id = cur.lastrowid
       microcode_bblocks[key]["bblock_id"] = bblock_id
 
       # Add the function -> basic block relation
-      cur_execute(sql_func_blocks, (func_id, bblock_id))
+      cur_execute(sql_func_blocks, (config.PARALLEL["main.function_bblocks"], func_id, bblock_id))
+      config.PARALLEL["main.function_bblocks"] += config.PARALLEL.get("nbr_steps", 1)
 
       for line in microcode_bblocks[key]["lines"]:
         if line["mnemonic"] is not None:
@@ -803,13 +816,17 @@ class CBinDiff:
             pseudocomment,
             func_id,
           ]
-          cur_execute(sql_inst, arguments)
+          cur_execute(sql_inst, [config.PARALLEL["main.instructions"]] + arguments)
+          config.PARALLEL["main.instructions"] += config.PARALLEL.get("nbr_steps", 1)
+
 
           inst_id = cur.lastrowid
           line["instruction_id"] = inst_id
 
           # Add the microcode instrution to the current basic block
-          cur_execute(sql_bbinst, (bblock_id, inst_id))
+          cur_execute(sql_bbinst, (config.PARALLEL["main.bb_instructions"], bblock_id, inst_id))
+          config.PARALLEL["main.bb_instructions"] += config.PARALLEL.get("nbr_steps", 1)
+
 
       # Incrase the current basic block number
       num += 1
@@ -822,7 +839,9 @@ class CBinDiff:
         # with them, just ignore...
         if children in microcode_bblocks:
           child_id = microcode_bblocks[children]["bblock_id"]
-          cur_execute(sql_bbrelations, [parent_id, child_id])
+          cur_execute(sql_bbrelations, [config.PARALLEL["main.bb_relations"], parent_id, child_id])
+          config.PARALLEL["main.bb_relations"] += config.PARALLEL.get("nbr_steps", 1)
+
 
   def get_function_from_dictionary(self, d):
     """
@@ -1046,7 +1065,9 @@ class CBinDiff:
         else:
           new_props.append(prop)
 
-      sql = """insert into main.functions (name, nodes, edges, indegree, outdegree, size,
+      if "main.functions" not in config.PARALLEL:
+        config.PARALLEL["main.functions"] = config.PARALLEL.get("my_slice", 0)
+      sql = """insert into main.functions (rowid, name, nodes, edges, indegree, outdegree, size,
                     instructions, mnemonics, names, prototype,
                     cyclomatic_complexity, primes_value, address,
                     comment, mangled_function, bytes_hash, pseudocode,
@@ -1059,12 +1080,13 @@ class CBinDiff:
                     constants_count, segment_rva, assembly_addrs, kgh_hash,
                     source_file, userdata, microcode, clean_microcode,
                     microcode_spp)
-                  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
       try:
-        cur.execute(sql, new_props)
+        cur.execute(sql, [config.PARALLEL["main.functions"]] + new_props)
+        config.PARALLEL["main.functions"] += config.PARALLEL.get("nbr_steps", 1)
       except:
         logging.error(
           "Error handling props in save_function(): %s", str(new_props)
@@ -1078,15 +1100,21 @@ class CBinDiff:
 
       # Phase 2: Save the callers and callees of the function
       callers, callees = props[len(props) - 4:len(props) - 2]
-      sql = "insert into callgraph (func_id, address, type) values (?, ?, ?)"
+      if "callgraph" not in config.PARALLEL:
+        config.PARALLEL["callgraph"] = config.PARALLEL.get("my_slice", 0)
+      sql = "insert into callgraph (rowid, func_id, address, type) values (?, ?, ?, ?)"
       for caller in callers:
-        cur.execute(sql, (func_id, str(caller), "caller"))
+        cur.execute(sql, (config.PARALLEL["callgraph"], func_id, str(caller), "caller"))
+        config.PARALLEL["callgraph"] += config.PARALLEL.get("nbr_steps", 1)
 
       for callee in callees:
-        cur.execute(sql, (func_id, str(callee), "callee"))
+        cur.execute(sql, (config.PARALLEL["callgraph"], func_id, str(callee), "callee"))
+        config.PARALLEL["callgraph"] += config.PARALLEL.get("nbr_steps", 1)
 
       # Phase 3: Insert the constants of the function
-      sql = "insert into constants (func_id, constant) values (?, ?)"
+      if "constants" not in config.PARALLEL:
+        config.PARALLEL["constants"] = config.PARALLEL.get("my_slice", 0)
+      sql = "insert into constants (rowid, func_id, constant) values (?, ?, ?)"
       props_dict = self.create_function_dictionary(props)
       for constant in props_dict["constants"]:
         should_add = False
@@ -1097,7 +1125,9 @@ class CBinDiff:
           constant = str(constant)
 
         if should_add:
-          cur.execute(sql, (func_id, constant))
+          cur.execute(sql, (config.PARALLEL["constants"], func_id, constant))
+          config.PARALLEL["constants"] += config.PARALLEL.get("nbr_steps", 1)
+
 
       # Phase 4: Save the basic blocks relationships
       if not self.function_summaries_only:

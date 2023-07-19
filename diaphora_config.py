@@ -9,6 +9,8 @@ to add your own code here.
 # Imports required by the configuration file
 import os
 
+PARALLEL = {}
+
 CONFIGURATION_FILE_PATH = os.path.realpath(__file__)
 CONFIGURATION_DIRECTORY = os.path.dirname(CONFIGURATION_FILE_PATH)
 
