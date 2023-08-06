@@ -1127,7 +1127,35 @@ class CIDABinDiff(diaphora.CBinDiff):
   def filter_functions(self, functions: Set[int]) -> Iterable[int]:
     # filter functions to export
     # Useful for parallel fork
-    return (functions - self._funcs_cache.keys())
+    if not config.PARALLEL_EXPORT:
+      result = (functions - self._funcs_cache.keys())
+      yield from result
+      return
+
+    if config.WORKER_ID == config.NUMBER_OF_WORKERS:
+      return
+
+    job_id, nbr_of_jobs = config.PARALLEL_JOB_QUEUE.get()
+    number_of_functions_per_job = (len(functions) + nbr_of_jobs-1)//nbr_of_jobs
+
+    sorted_functions_list = sorted(functions)
+    while job_id >=0:
+      print(f"[{config.WORKER_ID}/{config.NUMBER_OF_WORKERS}] processing job {job_id}")
+      first_function = job_id * number_of_functions_per_job
+      last_function = (job_id + 1) * number_of_functions_per_job
+      if job_id + 1 == nbr_of_jobs:
+        # make sure last job analyze last function
+        last_function += 1
+
+      for func in sorted_functions_list[first_function:last_function]:
+        if func not in self._funcs_cache:
+          yield func
+
+      # Report and wait for next job
+      config.PARALLEL_REPORT_QUEUE.put((config.WORKER_ID, job_id))
+      job_id, _ = config.PARALLEL_JOB_QUEUE.get()
+
+    print(f"[{config.WORKER_ID}/{config.NUMBER_OF_WORKERS}] done")
 
   def commit_and_start_transaction(self):
     self.db.commit()
@@ -1175,7 +1203,10 @@ class CIDABinDiff(diaphora.CBinDiff):
         m_elapsed, s_elapsed = divmod(elapsed, 60)
         h_elapsed, m_elapsed = divmod(m_elapsed, 60)
         message = line % (i, total_funcs, h_elapsed, m_elapsed, s_elapsed, h, m, s)
-        replace_wait_box(message)
+        if config.PARALLEL_EXPORT:
+          print(message)
+        else:
+          replace_wait_box(message)
 
       props = self.read_function(func)
       self.clear_pseudo_fields()
@@ -1196,6 +1227,9 @@ class CIDABinDiff(diaphora.CBinDiff):
       if total_funcs > config.EXPORTING_FUNCTIONS_TO_COMMIT:
         if i % (total_funcs / 10) == 0:
           self.commit_and_start_transaction()
+
+    if config.PARALLEL_EXPORT and config.WORKER_ID < config.NUMBER_OF_WORKERS:
+      return
 
     md5sum = GetInputFileMD5()
     self.save_callgraph(
@@ -3990,7 +4024,7 @@ def main():
     _generate_html(db1, diff_db, ea1, ea2, html_asm, html_pseudo)
     idaapi.qexit(0)
   else:
-    _diff_or_export(True)
+    _diff_or_export(not config.PARALLEL_EXPORT)
 
 
 if __name__ == "__main__":

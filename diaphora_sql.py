@@ -1,13 +1,28 @@
-from typing import Any, Callable, List
+from typing import Any, Callable, Dict, List
+
+import diaphora_config as config
 
 NATIVE = "native"
 MICROCODE = "microcode"
 
 
 class InsertInto:
-    """All queries related to the export of information on individual functions
-    """
-    def __execute(
+    """All queries related to the export of information on individual functions"""
+
+    __next_entry: Dict[str, int]
+    __first_entry: int
+    __step: int
+
+    def __init__(self) -> None:
+        if config.PARALLEL_EXPORT and config.WORKER_ID < config.NUMBER_OF_WORKERS:
+            self.__next_entry = {}
+            self.__first_entry = config.WORKER_ID
+            self.__step = config.NUMBER_OF_WORKERS
+            self.__execute = self.__parallel_execute
+        else:
+            self.__execute = self.__sequential_execute
+
+    def __sequential_execute(
         self,
         cur_execute: Callable[[str, List[Any]], None],
         table: str,
@@ -15,6 +30,40 @@ class InsertInto:
         column_defaults: str,
         column_values: List[Any],
     ) -> None:
+        cur_execute(
+            f"insert into {table} ({column_names}) values ({column_defaults})",
+            column_values,
+        )
+
+    def __parallel_execute(
+        self,
+        cur_execute: Callable[[str, List[Any]], None],
+        table: str,
+        column_names: str,
+        column_defaults: str,
+        column_values: List[Any],
+    ) -> None:
+        next_entry = self.__next_entry.get(table, self.__first_entry)
+        column_names = "rowid, " + column_names
+        column_defaults = "?, " + column_defaults
+
+        # cur_execute might be cur.execute or cur.executemany
+        nbr_columns = column_names.count(",")
+        if (
+            isinstance(column_values, list)
+            and all([isinstance(x, (list, tuple)) for x in column_values])
+            and all([len(x) == nbr_columns for x in column_values])
+        ):
+            # execute many
+            column_values = [
+                ([next_entry + i * self.__step] + list(column_values[i]))
+                for i in range(len(column_values))
+            ]
+            self.__next_entry[table] += len(column_values) * self.__step
+        else:
+            # execute one
+            column_values = [next_entry] + list(column_values)
+            self.__next_entry[table] += self.__step
         cur_execute(
             f"insert into {table} ({column_names}) values ({column_defaults})",
             column_values,
