@@ -1,3 +1,12 @@
+Fork of [Diaphora](https://github.com/joxeankoret/diaphora) with parallel export (joxeankoret/diaphora#265).
+
+Run with:  
+`IDADIR=<path to IDA> diaphora_parallel_export.py <file> [<nbr workers>] [<nbr jobs>]`
+
+This will launch `<nbr workers>` concurrent instances of idat64, make sure you have enough RAM before proceeding.
+
+---
+
 # δiaphora
 
 <p align='center'>
